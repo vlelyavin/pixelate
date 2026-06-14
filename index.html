@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>interactive poster experiment</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: -apple-system, sans-serif; }
+canvas { display: block; cursor: crosshair; }
+#drop-zone {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 10; background: #000; opacity: 1; transition: opacity 0.4s;
+}
+#drop-zone.hidden { opacity: 0; pointer-events: none; }
+#drop-zone .icon { font-size: 48px; margin-bottom: 20px; opacity: 0.6; }
+#drop-zone .title { color: #fff; font-size: 20px; font-weight: 500; margin-bottom: 8px; }
+#drop-zone .sub { color: #666; font-size: 14px; margin-bottom: 24px; }
+#drop-zone .btn {
+  padding: 10px 28px; border: 1px solid #333; border-radius: 8px;
+  color: #ccc; font-size: 14px; cursor: pointer; background: #111; transition: all 0.2s;
+}
+#drop-zone .btn:hover { border-color: #666; color: #fff; background: #1a1a1a; }
+#drop-zone.dragover { background: #0a0a0a; }
+
+#panel {
+  position: fixed; top: 20px; left: 20px;
+  background: rgba(10,10,10,0.85); border: 1px solid #222; border-radius: 10px;
+  padding: 16px 20px; min-width: 220px;
+  opacity: 0; transition: opacity 0.5s; pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+#panel.visible { opacity: 1; pointer-events: all; }
+#panel .label { color: #666; font-size: 11px; font-family: monospace; margin-bottom: 4px; display: flex; justify-content: space-between; }
+#panel .label span { color: #999; }
+#panel input[type=range] {
+  width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+  background: #222; border-radius: 2px; outline: none; margin-bottom: 14px;
+}
+#panel input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px;
+  background: #666; border-radius: 50%; cursor: pointer;
+}
+#panel input[type=range]::-webkit-slider-thumb:hover { background: #999; }
+#panel .stats { color: #444; font-size: 10px; font-family: monospace; margin-top: 4px; }
+
+#controls {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 16px; align-items: center;
+  color: #444; font-size: 12px; font-family: monospace;
+  opacity: 0; transition: opacity 0.5s;
+}
+#controls.visible { opacity: 1; }
+#controls kbd {
+  background: #1a1a1a; border: 1px solid #333; border-radius: 4px;
+  padding: 2px 6px; color: #888;
+}
+
+#new-img {
+  position: fixed; top: 20px; right: 20px;
+  padding: 8px 16px; border: 1px solid #333; border-radius: 6px;
+  color: #666; font-size: 12px; cursor: pointer; background: #0a0a0a;
+  opacity: 0; transition: opacity 0.3s; font-family: monospace;
+}
+#new-img.visible { opacity: 1; }
+#new-img:hover { border-color: #555; color: #aaa; }
+</style>
+</head>
+<body>
+
+<div id="drop-zone">
+  <div class="icon">✦</div>
+  <div class="title">drop an image to pixelate</div>
+  <div class="sub">or click below to choose a file</div>
+  <div class="btn" id="choose-btn">choose image</div>
+</div>
+
+<div id="panel">
+  <div class="label">radius <span id="v-radius">100</span></div>
+  <input type="range" id="r-radius" min="30" max="300" value="100">
+  <div class="label">force <span id="v-force">5</span></div>
+  <input type="range" id="r-force" min="1" max="15" value="5">
+  <div class="label">pixel size <span id="v-pixel">4</span></div>
+  <input type="range" id="r-pixel" min="2" max="16" value="4">
+  <div class="label">spring <span id="v-spring">0.06</span></div>
+  <input type="range" id="r-spring" min="1" max="20" value="6">
+  <div class="stats" id="stats">particles: 0 | fps: 0</div>
+</div>
+
+<div id="controls">
+  <span><kbd>mouse</kbd> repel</span>
+  <span><kbd>sliders</kbd> adjust</span>
+  <span><kbd>space</kbd> reset</span>
+</div>
+
+<button id="new-img">new image</button>
+<canvas id="c"></canvas>
+<input type="file" id="file-input" accept="image/*" style="display:none">
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const dropZone = document.getElementById('drop-zone');
+const controls = document.getElementById('controls');
+const panel = document.getElementById('panel');
+const newImgBtn = document.getElementById('new-img');
+const statsEl = document.getElementById('stats');
+
+// settings
+let mouseRadius = 100;
+let force = 5;
+let pixelSize = 4;
+let spring = 0.06;
+
+// state - typed arrays for performance
+let count = 0;
+let posX, posY, origX, origY, velX, velY, colors, sizes;
+let mouseX = -9999, mouseY = -9999;
+let img = null;
+let animId = null;
+let lastTime = 0, frameCount = 0, fps = 0;
+
+// sliders
+const rRadius = document.getElementById('r-radius');
+const rForce = document.getElementById('r-force');
+const rPixel = document.getElementById('r-pixel');
+const rSpring = document.getElementById('r-spring');
+
+rRadius.oninput = () => { mouseRadius = +rRadius.value; document.getElementById('v-radius').textContent = rRadius.value; };
+rForce.oninput = () => { force = +rForce.value; document.getElementById('v-force').textContent = rForce.value; };
+rPixel.oninput = () => { pixelSize = +rPixel.value; document.getElementById('v-pixel').textContent = rPixel.value; if (img) initParticles(); };
+rSpring.oninput = () => { spring = +rSpring.value / 100; document.getElementById('v-spring').textContent = spring.toFixed(2); };
+
+// file handling
+document.getElementById('choose-btn').addEventListener('click', () => document.getElementById('file-input').click());
+newImgBtn.addEventListener('click', () => document.getElementById('file-input').click());
+document.getElementById('file-input').addEventListener('change', e => { if (e.target.files[0]) loadImage(e.target.files[0]); });
+document.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+document.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+document.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); if (e.dataTransfer.files[0]) loadImage(e.dataTransfer.files[0]); });
+
+function loadImage(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const image = new Image();
+    image.onload = () => {
+      img = image;
+      dropZone.classList.add('hidden');
+      controls.classList.add('visible');
+      panel.classList.add('visible');
+      newImgBtn.classList.add('visible');
+      initParticles();
+    };
+    image.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function initParticles() {
+  if (animId) cancelAnimationFrame(animId);
+
+  const scale = Math.min(
+    (window.innerWidth * 0.9) / img.width,
+    (window.innerHeight * 0.9) / img.height
+  );
+  const w = Math.floor(img.width * scale);
+  const h = Math.floor(img.height * scale);
+
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+
+  const offscreen = document.createElement('canvas');
+  offscreen.width = w; offscreen.height = h;
+  const octx = offscreen.getContext('2d');
+  octx.drawImage(img, 0, 0, w, h);
+  const imageData = octx.getImageData(0, 0, w, h).data;
+
+  const offsetX = (canvas.width - w) / 2;
+  const offsetY = (canvas.height - h) / 2;
+
+  // count particles first
+  let n = 0;
+  for (let y = 0; y < h; y += pixelSize) {
+    for (let x = 0; x < w; x += pixelSize) {
+      const i = (y * w + x) * 4;
+      if (imageData[i+3] < 30) continue;
+      if (imageData[i] + imageData[i+1] + imageData[i+2] < 15) continue;
+      n++;
+    }
+  }
+
+  // allocate typed arrays
+  count = n;
+  posX = new Float32Array(n);
+  posY = new Float32Array(n);
+  origX = new Float32Array(n);
+  origY = new Float32Array(n);
+  velX = new Float32Array(n);
+  velY = new Float32Array(n);
+  sizes = new Float32Array(n);
+  colors = new Uint32Array(n); // packed RGBA
+
+  let idx = 0;
+  const pSize = pixelSize * 0.85;
+  for (let y = 0; y < h; y += pixelSize) {
+    for (let x = 0; x < w; x += pixelSize) {
+      const i = (y * w + x) * 4;
+      const r = imageData[i], g = imageData[i+1], b = imageData[i+2], a = imageData[i+3];
+      if (a < 30) continue;
+      if (r + g + b < 15) continue;
+
+      const px = x + offsetX;
+      const py = y + offsetY;
+      posX[idx] = px; posY[idx] = py;
+      origX[idx] = px; origY[idx] = py;
+      velX[idx] = 0; velY[idx] = 0;
+      sizes[idx] = pSize;
+      colors[idx] = (255 << 24) | (b << 16) | (g << 8) | r; // ABGR for canvas
+      idx++;
+    }
+  }
+
+  statsEl.textContent = `particles: ${count.toLocaleString()} | fps: --`;
+  animate();
+}
+
+canvas.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+canvas.addEventListener('mouseleave', () => { mouseX = -9999; mouseY = -9999; });
+window.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); if (img) initParticles(); } });
+window.addEventListener('resize', () => { if (img) initParticles(); });
+
+function animate(time) {
+  // fps counter
+  frameCount++;
+  if (time - lastTime > 1000) {
+    fps = frameCount;
+    frameCount = 0;
+    lastTime = time;
+    statsEl.textContent = `particles: ${count.toLocaleString()} | fps: ${fps}`;
+  }
+
+  // clear with trail
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const mr2 = mouseRadius * mouseRadius;
+  const mx = mouseX, my = mouseY;
+  const sp = spring;
+  const f = force;
+
+  for (let i = 0; i < count; i++) {
+    const dx = posX[i] - mx;
+    const dy = posY[i] - my;
+    const distSq = dx * dx + dy * dy;
+
+    if (distSq < mr2 && distSq > 0) {
+      const dist = Math.sqrt(distSq);
+      const frc = ((mouseRadius - dist) / mouseRadius) * f;
+      velX[i] += (dx / dist) * frc;
+      velY[i] += (dy / dist) * frc;
+    }
+
+    velX[i] += (origX[i] - posX[i]) * sp;
+    velY[i] += (origY[i] - posY[i]) * sp;
+    velX[i] *= 0.9;
+    velY[i] *= 0.9;
+    posX[i] += velX[i];
+    posY[i] += velY[i];
+  }
+
+  // batch render using ImageData for max perf on high particle counts
+  if (count > 50000) {
+    renderImageData();
+  } else {
+    renderArcs();
+  }
+
+  animId = requestAnimationFrame(animate);
+}
+
+function renderArcs() {
+  for (let i = 0; i < count; i++) {
+    const c = colors[i];
+    const r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+
+    // subtle color shift on displacement
+    const disp = Math.abs(posX[i] - origX[i]) + Math.abs(posY[i] - origY[i]);
+    const shift = Math.min(disp / 80, 1);
+    const fr = Math.min(255, r + shift * 30) | 0;
+    const fb = Math.min(255, b + shift * 50) | 0;
+
+    ctx.fillStyle = `rgb(${fr},${g},${fb})`;
+    ctx.beginPath();
+    ctx.arc(posX[i], posY[i], sizes[i] / 2, 0, 6.283);
+    ctx.fill();
+  }
+}
+
+function renderImageData() {
+  // pixel-level rendering for massive particle counts
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  const cw = canvas.width;
+
+  for (let i = 0; i < count; i++) {
+    const px = posX[i] | 0;
+    const py = posY[i] | 0;
+    if (px < 0 || px >= cw || py < 0 || py >= canvas.height) continue;
+
+    const c = colors[i];
+    const r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+    const off = (py * cw + px) * 4;
+    data[off] = r; data[off+1] = g; data[off+2] = b; data[off+3] = 255;
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+}
+</script>
+</body>
+</html>
